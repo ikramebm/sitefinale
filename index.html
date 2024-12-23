@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Streaming ESP32-CAM avec Métriques</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            text-align: center;
+            background-color: #f5f5f5;
+            padding: 20px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        #videoCanvas {
+            max-width: 100%;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+
+        .button-container {
+            margin: 20px 0;
+        }
+
+        button {
+            margin: 0 10px;
+            padding: 12px 25px;
+            font-size: 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+
+        #startStream {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        #startStream:hover {
+            background-color: #45a049;
+        }
+
+        #stopStream {
+            background-color: #f44336;
+            color: white;
+        }
+
+        #stopStream:hover {
+            background-color: #da190b;
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        #status {
+            margin: 15px 0;
+            padding: 15px;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .loading {
+            display: none;
+            margin: 10px auto;
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-radius: 50%;
+            border-top: 5px solid #4CAF50;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .metrics-container {
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+        }
+
+        .metric-card {
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 10px 0;
+            color: #2196F3;
+        }
+
+        .metric-label {
+            font-size: 14px;
+            color: #666;
+        }
+
+        #metricsChart {
+            width: 100%;
+            height: 200px;
+            margin: 20px 0;
+            background: white;
+            border-radius: 5px;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+
+        .connection-info {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border-radius: 5px;
+            font-size: 14px;
+            color: #2e7d32;
+        }
+
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.7.0/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Streaming ESP32-CAM</h1>
+        
+        <div class="button-container">
+            <button id="startStream">Démarrer Stream</button>
+            <button id="stopStream" disabled>Arrêter Stream</button>
+        </div>
+
+        <div id="status"></div>
+        <div class="loading" id="loading"></div>
+        
+        <canvas id="videoCanvas" width="640" height="480"></canvas>
+        
+        <div class="metrics-container">
+            <div class="metric-card">
+                <div class="metric-label">Ping</div>
+                <div class="metric-value" id="pingValue">-- ms</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Gigue</div>
+                <div class="metric-value" id="jitterValue">-- ms</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Latence</div>
+                <div class="metric-value" id="latencyValue">-- ms</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">FPS</div>
+                <div class="metric-value" id="fpsValue">--</div>
+            </div>
+        </div>
+
+        <canvas id="metricsChart"></canvas>
+        
+        <div class="connection-info" id="connectionInfo">
+            En attente de connexion...
+        </div>
+    </div>
+
+    <script>
+        const socket = new WebSocket('wss://ikrame-s-websocket-server.glitch.me');
+        const canvas = document.getElementById('videoCanvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('startStream');
+        const stopButton = document.getElementById('stopStream');
+        const statusDiv = document.getElementById('status');
+        const loadingDiv = document.getElementById('loading');
+        const connectionInfo = document.getElementById('connectionInfo');
+
+        let isStreaming = false;
+        let frameCount = 0;
+        let lastFrameTime = Date.now();
+        let lastFrameReceived = Date.now();
+        
+        // Variables pour les métriques
+        let pingTimes = [];
+        let jitterValues = [];
+        let latencyValues = [];
+        let fpsValues = [];
+        
+        // Configuration du graphique
+        const metricsCtx = document.getElementById('metricsChart').getContext('2d');
+        const metricsChart = new Chart(metricsCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Ping (ms)',
+                    data: [],
+                    borderColor: '#2196F3',
+                    tension: 0.4,
+                    fill: false
+                }, {
+                    label: 'Gigue (ms)',
+                    data: [],
+                    borderColor: '#4CAF50',
+                    tension: 0.4,
+                    fill: false
+                }, {
+                    label: 'Latence (ms)',
+                    data: [],
+                    borderColor: '#FFC107',
+                    tension: 0.4,
+                    fill: false
+                }, {
+                    label: 'FPS',
+                    data: [],
+                    borderColor: '#9C27B0',
+                    tension: 0.4,
+                    fill: false
+                }]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    y: {
+                        beginAtZero: true
+                    }
+                },
+                plugins: {
+                    legend: {
+                        position: 'top'
+                    }
+                }
+            }
+        });
+
+        function updateMetrics(frameTimestamp) {
+            const now = Date.now();
+            
+            // Calcul du ping
+            const ping = now - frameTimestamp;
+            pingTimes.push(ping);
+            if (pingTimes.length > 30) pingTimes.shift();
+            
+            // Calcul de la gigue
+            if (pingTimes.length > 1) {
+                const jitter = Math.abs(pingTimes[pingTimes.length - 1] - pingTimes[pingTimes.length - 2]);
+                jitterValues.push(jitter);
+                if (jitterValues.length > 30) jitterValues.shift();
+            }
+            
+            // Calcul de la latence
+            const latency = now - lastFrameReceived;
+            latencyValues.push(latency);
+            if (latencyValues.length > 30) latencyValues.shift();
+            
+            // Calcul du FPS
+            const fps = 1000 / (now - lastFrameTime);
+            fpsValues.push(fps);
+            if (fpsValues.length > 30) fpsValues.shift();
+            
+            // Mise à jour des affichages
+            document.getElementById('pingValue').textContent = `${Math.round(average(pingTimes))} ms`;
+            document.getElementById('jitterValue').textContent = `${Math.round(average(jitterValues))} ms`;
+            document.getElementById('latencyValue').textContent = `${Math.round(average(latencyValues))} ms`;
+            document.getElementById('fpsValue').textContent = Math.round(average(fpsValues));
+            
+            // Mise à jour du graphique
+            const timeLabels = Array(pingTimes.length).fill('').map((_, i) => i);
+            metricsChart.data.labels = timeLabels;
+            metricsChart.data.datasets[0].data = pingTimes;
+            metricsChart.data.datasets[1].data = jitterValues;
+            metricsChart.data.datasets[2].data = latencyValues;
+            metricsChart.data.datasets[3].data = fpsValues;
+            metricsChart.update();
+            
+            lastFrameTime = now;
+            lastFrameReceived = now;
+        }
+
+        function average(array) {
+            return array.length ? array.reduce((a, b) => a + b) / array.length : 0;
+        }
+
+        function updateStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = type === 'error' ? 'error' : 'success';
+        }
+
+        function updateConnectionInfo(message) {
+            connectionInfo.textContent = message;
+        }
+
+        // Gestionnaires d'événements WebSocket
+        socket.onopen = () => {
+            console.log('Connecté au serveur WebSocket');
+            updateStatus('Connecté au serveur');
+            socket.send(JSON.stringify({type: 'register-web'}));
+            startButton.disabled = false;
+        };
+
+        socket.onclose = () => {
+            console.log('Déconnecté du serveur WebSocket');
+            updateStatus('Déconnecté du serveur', 'error');
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            isStreaming = false;
+            loadingDiv.style.display = 'none';
+        };
+
+        socket.onerror = (error) => {
+            console.error('Erreur WebSocket:', error);
+            updateStatus('Erreur de connexion', 'error');
+            loadingDiv.style.display = 'none';
+        };
+
+        socket.onmessage = async (event) => {
+            if (event.data instanceof Blob) {
+                const imageUrl = URL.createObjectURL(event.data);
+                const img = new Image();
+                
+                img.onload = () => {
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    URL.revokeObjectURL(imageUrl);
+                    frameCount++;
+                    updateMetrics(Date.now());
+                };
+                
+                img.src = imageUrl;
+                return;
+            }
+
+            try {
+                const message = JSON.parse(event.data);
+                console.log('Message reçu:', message);
+
+                switch (message.type) {
+                    case 'status':
+                        updateStatus(message.message);
+                        break;
+                    case 'error':
+                        updateStatus(message.message, 'error');
+                        break;
+                    case 'metrics':
+                        if (message.data) {
+                            updateMetrics(message.data.timestamp);
+                        }
+                        break;
+                }
+            } catch (error) {
+                console.error('Erreur parsing message:', error);
+            }
+        };
+
+        // Gestionnaires d'événements pour les boutons
+        startButton.addEventListener('click', () => {
+            console.log('Démarrage du stream demandé');
+            isStreaming = true;
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            loadingDiv.style.display = 'block';
+            socket.send(JSON.stringify({type: 'start-stream'}));
+            
+            lastFrameTime = Date.now();
+            frameCount = 0;
+        });
+
+        stopButton.addEventListener('click', () => {
+            console.log('Arrêt du stream demandé');
+            isStreaming = false;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            loadingDiv.style.display = 'none';
+            socket.send(JSON.stringify({type: 'stop-stream'}));
+            updateConnectionInfo('Stream arrêté');
+            
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        });
+
+        window.onbeforeunload = () => {
+            if (isStreaming) {
+                socket.send(JSON.stringify({type: 'stop-stream'}));
+            }
+            socket.close();
+        };
+    </script>
+</body>
+</html>
